@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+REMOVE_LINK = -1
+INFINITE_COST = float('inf')
+REMOVE_NODE_INDICATOR = "-1"
+
+class Router:
+    def __init__(self, name):
+        self.name = name
+        self.neighbors = {}  # {neighbor_name: cost}
+        self.distance_table = {}  # {dest: {next_hop: cost}}
+        self.routing_table = {}  # {dest: (next_hop, cost)}
+    
+    def add_neighbor(self, neighbor, cost):
+        self.neighbors[neighbor] = cost
+    
+    def remove_neighbor(self, neighbor):
+        if neighbor in self.neighbors:
+            del self.neighbors[neighbor]
+            # When a neighbor is removed, set routes through it to infinity
+            for dest in self.distance_table:
+                if neighbor in self.distance_table[dest]:
+                    self.distance_table[dest][neighbor] = INFINITE_COST
+    
+    def remove_node_from_distance_table(self, removed_node):
+        """Remove a node from distance table when it's removed from network"""
+        # Remove as destination
+        if removed_node in self.distance_table:
+            del self.distance_table[removed_node]                
+        for dest in self.distance_table:
+            if removed_node in self.distance_table[dest]:
+                del self.distance_table[dest][removed_node]                
+        if removed_node in self.routing_table:
+            del self.routing_table[removed_node]
+    
+    def update_neighbor_cost(self, neighbor, cost):
+        old_cost = self.neighbors.get(neighbor, INFINITE_COST)        
+        if cost == REMOVE_LINK:  # Remove link
+            self.remove_neighbor(neighbor)
+            return old_cost != INFINITE_COST  # Return True if a link was actually removed
+        else:
+            old_cost = self.neighbors.get(neighbor, INFINITE_COST)
+            self.neighbors[neighbor] = cost                        
+            if neighbor in self.distance_table:
+                self.distance_table[neighbor][neighbor] = cost            
+            return old_cost != cost  # Return True if the cost changed
+    
+    def initialize_distance_table(self, all_routers):
+        self.distance_table = {}
+        for dest in all_routers:
+            if dest != self.name:
+                self.distance_table[dest] = {}
+                # Initialize all potential next hops
+                for next_hop in all_routers:
+                    if next_hop != self.name:
+                        if next_hop in self.neighbors and next_hop == dest:                            
+                            self.distance_table[dest][next_hop] = self.neighbors[next_hop]
+                        else:                            
+                            self.distance_table[dest][next_hop] = INFINITE_COST
+    
+    def update_distance_table_for_new_node(self, new_node, all_routers):    
+        if new_node != self.name:
+            self.distance_table[new_node] = {}                        
+            for next_hop in all_routers:
+                if next_hop != self.name:
+                    if next_hop in self.neighbors and next_hop == new_node:                        
+                        self.distance_table[new_node][next_hop] = self.neighbors[next_hop]
+                    else:                        
+                        self.distance_table[new_node][next_hop] = INFINITE_COST              
+        for dest in self.distance_table:
+            if new_node != self.name and new_node not in self.distance_table[dest]:
+                self.distance_table[dest][new_node] = INFINITE_COST
+    
+    def print_distance_table(self, time_step, all_routers):
+        print(f"Distance Table of router {self.name} at t={time_step}:")
+        destinations = sorted([r for r in all_routers if r != self.name])
+        next_hops = sorted([r for r in all_routers if r != self.name])                
+        print("     ", end="")
+        for next_hop in next_hops:
+            print(f"{next_hop:<5}", end="")
+        print()                
+        for dest in destinations:
+            print(f"{dest:<5}", end="")
+            for next_hop in next_hops:
+                if dest in self.distance_table and next_hop in self.distance_table[dest]:
+                    cost = self.distance_table[dest][next_hop]
+                    cost_str = "INF" if cost == INFINITE_COST else str(cost)
+                else:
+                    cost_str = "INF"
+                print(f"{cost_str:<5}", end="")
+            print()
+        print()
+    
+    def update_routing_table(self):
+        old_routing_table = self.routing_table.copy()
+        self.routing_table = {}                
+        for dest in self.distance_table:
+            min_cost = INFINITE_COST
+            best_next_hop = None                        
+            for next_hop in self.distance_table[dest]:
+                cost = self.distance_table[dest][next_hop]
+                if cost < min_cost:
+                    min_cost = cost
+                    best_next_hop = next_hop                       
+            if best_next_hop is not None and min_cost != INFINITE_COST:
+                self.routing_table[dest] = (best_next_hop, min_cost)
+            else:
+                self.routing_table[dest] = (None, INFINITE_COST)                
+        return old_routing_table != self.routing_table
+    
+    def print_routing_table(self, all_routers):
+        print(f"Routing Table of router {self.name}:")
+        destinations = sorted([r for r in all_routers if r != self.name])
+        for dest in destinations:
+            route = self.routing_table.get(dest)
+            if route is None or route[0] is None or route[1] == INFINITE_COST:
+                print(f"{dest},INF,INF")
+            else:
+                next_hop, cost = route
+                print(f"{dest},{next_hop},{cost}")
+        print()
+    
+    def get_distance_vector(self):
+        """Returns this router's current distance vector to all destinations"""
+        dv = {}
+        for dest in self.routing_table:
+            if self.routing_table[dest][1] != INFINITE_COST:
+                dv[dest] = self.routing_table[dest][1]
+            else:
+                dv[dest] = INFINITE_COST
+        return dv
+    
+    def get_poisoned_distance_vector(self, requesting_neighbor):
+        """
+        Returns distance vector with poisoned reverse applied.
+        If the requesting neighbor is the next hop to a destination,
+        advertise infinite cost to prevent routing loops.
+        """
+        dv = self.get_distance_vector()
+        poisoned_dv = {}
+        
+        for dest, cost in dv.items():
+            # Check if requesting neighbor is the next hop for this destination
+            if (dest in self.routing_table and 
+                self.routing_table[dest][0] == requesting_neighbor):
+                # Apply poisoned reverse - advertise infinite cost
+                poisoned_dv[dest] = INFINITE_COST
+            else:
+                # Normal advertisement
+                poisoned_dv[dest] = cost
+        
+        return poisoned_dv
+
+class Network:
+    def __init__(self):
+        self.routers = {}
+    
+    def add_router(self, router_name):
+        """Add a new router to the network"""
+        if router_name not in self.routers:
+            is_new_node = len(self.routers) > 0  # Check if this is a new node after initialization
+            self.routers[router_name] = Router(router_name)            
+            if is_new_node:                
+                all_router_names = list(self.routers.keys())
+                for existing_router in self.routers.values():
+                    existing_router.update_distance_table_for_new_node(router_name, all_router_names)                             
+                self.routers[router_name].initialize_distance_table(all_router_names)                
+                return True  # Indicate a new router was added
+        return False  # No new router was added
+    
+    def remove_router(self, router_name):
+        """Remove a router from the network"""
+        if router_name in self.routers:            
+            for other_router in self.routers.values():
+                if other_router.name != router_name:                    
+                    other_router.remove_neighbor(router_name)                    
+                    other_router.remove_node_from_distance_table(router_name)                        
+            del self.routers[router_name]
+            return True
+        return False
+    
+    def update_link(self, router1, router2, cost):
+        # Handle node removal
+        if cost == REMOVE_LINK:            
+            if router2 == REMOVE_NODE_INDICATOR:                
+                return self.remove_router(router1)
+            elif router1 == REMOVE_NODE_INDICATOR:                
+                return self.remove_router(router2)                
+        r1_is_new = self.add_router(router1)
+        r2_is_new = self.add_router(router2)                
+        r1_changed = self.routers[router1].update_neighbor_cost(router2, cost)
+        r2_changed = self.routers[router2].update_neighbor_cost(router1, cost)        
+        return r1_changed or r2_changed or r1_is_new or r2_is_new
+    
+    def initialize_distance_tables(self):
+        all_router_names = list(self.routers.keys())
+        for router in self.routers.values():
+            router.initialize_distance_table(all_router_names)
+    
+    def run_distance_vector(self, max_iterations=100):
+        """Run the distance vector algorithm with poisoned reverse until convergence or max iterations"""
+        time_step = 0
+        all_router_names = sorted(self.routers.keys())               
+        self.initialize_distance_tables()
+        for name in all_router_names:
+            router = self.routers[name]
+            router.print_distance_table(time_step, all_router_names)
+            router.update_routing_table()
+        any_change = True
+        while any_change and time_step < max_iterations:
+            time_step += 1
+            any_change = False                        
+            # Get poisoned distance vectors for each router-neighbor pair
+            poisoned_advertisements = {}
+            for name, router in self.routers.items():
+                poisoned_advertisements[name] = {}
+                for neighbor_name in router.neighbors:
+                    # Create poisoned distance vector specifically for this neighbor
+                    poisoned_advertisements[name][neighbor_name] = router.get_poisoned_distance_vector(neighbor_name)
+            
+            for router_name, router in self.routers.items():
+                for neighbor_name in router.neighbors:
+                    if neighbor_name in poisoned_advertisements:
+                        neighbor_cost = router.neighbors[neighbor_name]
+                        # Get the poisoned distance vector sent to this router
+                        if router_name in poisoned_advertisements[neighbor_name]:
+                            neighbor_dv = poisoned_advertisements[neighbor_name][router_name]
+                        else:
+                            # Fallback to regular distance vector if poisoned version not available
+                            neighbor_dv = self.routers[neighbor_name].get_distance_vector()
+                        
+                        for dest, dest_cost in neighbor_dv.items():
+                            if dest != router_name:  # Don't route to self
+                                new_cost = neighbor_cost + dest_cost
+                                if dest in router.distance_table:                                    
+                                    router.distance_table[dest][neighbor_name] = new_cost                        
+            for name in all_router_names:
+                router = self.routers[name]
+                router.print_distance_table(time_step, all_router_names)
+                if router.update_routing_table():
+                    any_change = True
+        return time_step
+    
+    def process_updates(self, updates, start_time_step):
+        """Process link updates and continue distance vector algorithm with poisoned reverse"""
+        if not updates:
+            return start_time_step                    
+        all_router_names = sorted(self.routers.keys())
+        for name in all_router_names:
+            router = self.routers[name]
+            router.print_routing_table(all_router_names)                
+        previous_dvs = {
+            name: router.get_distance_vector()
+            for name, router in self.routers.items()
+        }                    
+        any_link_changed = False
+        new_nodes_added = False
+        nodes_removed = False        
+        for router1, router2, cost in updates:
+            # Check for node removal
+            if cost == REMOVE_LINK:
+                if router2 == REMOVE_NODE_INDICATOR:
+                    print(f"Removing node {router1} from network")
+                    nodes_removed = True
+                elif router1 == REMOVE_NODE_INDICATOR:
+                    print(f"Removing node {router2} from network")
+                    nodes_removed = True
+                link_changed = self.update_link(router1, router2, cost)
+                any_link_changed = any_link_changed or link_changed
+                continue                        
+            old_router_count = len(self.routers)
+            link_changed = self.update_link(router1, router2, cost)
+            new_router_count = len(self.routers)            
+            if new_router_count > old_router_count:
+                new_nodes_added = True
+                print(f"New node(s) added to network: {router1 if router1 not in previous_dvs else ''} {router2 if router2 not in previous_dvs else ''}".strip())            
+            any_link_changed = any_link_changed or link_changed        
+        if not any_link_changed and not new_nodes_added and not nodes_removed:
+            return start_time_step                
+        all_router_names = sorted(self.routers.keys())                    
+        for router in self.routers.values():            
+            for neighbor in router.neighbors:
+                if neighbor in router.distance_table:
+                    router.distance_table[neighbor][neighbor] = router.neighbors[neighbor]                        
+            for dest in router.distance_table:
+                for next_hop in list(router.distance_table[dest].keys()):
+                    if next_hop not in router.neighbors:
+                        router.distance_table[dest][next_hop] = INFINITE_COST                        
+            for neighbor_name in router.neighbors:
+                if neighbor_name in previous_dvs:
+                    neighbor_cost = router.neighbors[neighbor_name]
+                    neighbor_dv = previous_dvs[neighbor_name]                                        
+                    for dest in router.distance_table:
+                        if dest != router.name and dest in neighbor_dv:
+                            new_cost = neighbor_cost + neighbor_dv[dest]                            
+                            router.distance_table[dest][neighbor_name] = new_cost            
+            router.update_routing_table()        
+        time_step = start_time_step                
+        any_change = True
+        max_iterations = time_step + 15  # Allow more iterations for topology changes        
+        while any_change and time_step < max_iterations:
+            time_step += 1
+            any_change = False                       
+            # Get poisoned distance vectors for each router-neighbor pair
+            poisoned_advertisements = {}
+            for name, router in self.routers.items():
+                poisoned_advertisements[name] = {}
+                for neighbor_name in router.neighbors:
+                    poisoned_advertisements[name][neighbor_name] = router.get_poisoned_distance_vector(neighbor_name)
+            
+            for name in all_router_names:
+                if name in self.routers:  # Check if router still exists
+                    router = self.routers[name]
+                    router.print_distance_table(time_step, all_router_names)                       
+            for router_name, router in self.routers.items():
+                old_table = {}
+                for dest in router.distance_table:
+                    old_table[dest] = router.distance_table[dest].copy()                
+                for neighbor_name in router.neighbors:
+                    if neighbor_name in poisoned_advertisements:
+                        neighbor_cost = router.neighbors[neighbor_name]
+                        # Get the poisoned distance vector sent to this router
+                        if router_name in poisoned_advertisements[neighbor_name]:
+                            neighbor_dv = poisoned_advertisements[neighbor_name][router_name]
+                        else:
+                            neighbor_dv = self.routers[neighbor_name].get_distance_vector()
+                        
+                        for dest, dest_cost in neighbor_dv.items():
+                            if dest != router_name and dest in router.distance_table:
+                                new_cost = neighbor_cost + dest_cost                                
+                                router.distance_table[dest][neighbor_name] = new_cost                               
+                for dest in router.distance_table:
+                    if dest not in old_table or old_table[dest] != router.distance_table[dest]:
+                        any_change = True                       
+            for router in self.routers.values():
+                if router.update_routing_table():
+                    any_change = True               
+        for name in all_router_names:
+            if name in self.routers:
+                router = self.routers[name]
+                router.print_routing_table(all_router_names)        
+        return time_step
+
+def parse_network(input_data):
+    lines = input_data.strip().split('\n')
+    line_index = 0
+    network = Network()
+    routers = []    
+    while line_index < len(lines) and lines[line_index] != "START":
+        router_name = lines[line_index].strip()
+        if router_name:
+            routers.append(router_name)
+        line_index += 1
+    line_index += 1  # Skip "START"    
+    for router in routers:
+        network.add_router(router)    
+    while line_index < len(lines) and lines[line_index] != "UPDATE":
+        parts = lines[line_index].strip().split()
+        if len(parts) == 3:
+            router1, router2, cost = parts[0], parts[1], int(parts[2])
+            network.update_link(router1, router2, cost)
+        line_index += 1
+    line_index += 1  # Skip "UPDATE"    
+    updates = []
+    while line_index < len(lines) and lines[line_index] != "END":
+        parts = lines[line_index].strip().split()
+        if len(parts) == 2 and parts[1] == REMOVE_NODE_INDICATOR:            
+            updates.append((parts[0], REMOVE_NODE_INDICATOR, REMOVE_LINK))
+        elif len(parts) == 3:            
+            updates.append((parts[0], parts[1], int(parts[2])))
+        line_index += 1
+    return network, updates
+
+def main():
+    try:
+        import sys
+        input_data = sys.stdin.read()
+        network, updates = parse_network(input_data)        
+        final_time_step = network.run_distance_vector()               
+        if updates:
+            network.process_updates(updates, final_time_step)
+        else:            
+            all_router_names = sorted(network.routers.keys())
+            for name in all_router_names:
+                router = network.routers[name]
+                router.print_routing_table(all_router_names)
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+if __name__ == "__main__":
+    main()
